@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import {readFile} from 'node:fs/promises';
-import {createReadStream} from 'node:fs';
+import {createReadStream, createWriteStream} from 'node:fs';
+import {Readable} from 'node:stream';
+import {pipeline} from 'node:stream/promises';
+import axios from 'axios';
+import type {MockOffer} from './types/mock-offer.type.js';
 import {createInterface} from 'node:readline';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
@@ -40,7 +44,6 @@ function parseNumber(value: string, field: string): number {
 }
 
 function parseOffer(line: string, index: number): Offer {
-  // Поля разделены TAB; изображения и удобства внутри поля разделены «;».
   const fields = line.split('\t');
   if (fields.length !== 20) {
     return fail(`Строка ${index}: ожидалось 20 полей, получено ${fields.length}`);
@@ -103,6 +106,71 @@ function parseOffer(line: string, index: number): Offer {
   };
 }
 
+
+function randomInt(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function randomItem<T>(items: readonly T[]): T {
+  return items[randomInt(0, items.length - 1)];
+}
+
+function serializeOffer(mock: MockOffer): string {
+  const city = randomItem(cities);
+  const coords: Record<CityName, [number, number]> = {
+    Paris: [48.85661, 2.351499], Cologne: [50.938361, 6.959974],
+    Brussels: [50.846557, 4.351697], Amsterdam: [52.370216, 4.895168],
+    Hamburg: [53.550341, 10.000654], Dusseldorf: [51.225402, 6.776314]
+  };
+  const [latitude, longitude] = coords[city];
+  const chosen = [...new Set(Array.from({length: randomInt(1, 7)}, () => randomItem(conveniences)))];
+  return [
+    mock.title, mock.description, new Date().toISOString(), city,
+    mock.previewImage, mock.images.join(';'), String(Math.random() < 0.3),
+    'false', (randomInt(10, 50) / 10).toFixed(1), randomItem(housingTypes),
+    randomInt(1, 8), randomInt(1, 10), randomInt(100, 100000), chosen.join(';'),
+    mock.host.name, mock.host.email, mock.host.avatarUrl ?? '', String(mock.host.isPro),
+    latitude, longitude
+  ].join('\t').concat('\n');
+}
+
+function validateMockOffer(value: MockOffer): void {
+  if (!value || typeof value.title !== 'string' || value.title.length < 10 || value.title.length > 100 ||
+    typeof value.description !== 'string' || value.description.length < 20 || value.description.length > 1024 ||
+    typeof value.previewImage !== 'string' || !Array.isArray(value.images) || value.images.length !== 6 ||
+    !value.host || typeof value.host.name !== 'string' || typeof value.host.email !== 'string' ||
+    typeof value.host.isPro !== 'boolean') {
+    throw new Error('JSON-server вернул некорректный шаблон предложения');
+  }
+  const values = [value.title, value.description, value.previewImage, ...value.images,
+    value.host.name, value.host.email, value.host.avatarUrl ?? ''];
+  if (values.some((v) => typeof v !== 'string' || /[\t\r\n;]/.test(v))) {
+    throw new Error('Поля шаблона содержат недопустимые разделители TSV');
+  }
+}
+
+async function generateOffers(quantityRaw: string | undefined, filePath: string | undefined, url: string | undefined): Promise<void> {
+  if (!quantityRaw || !/^[1-9]\d*$/.test(quantityRaw) || !Number.isSafeInteger(Number(quantityRaw))) {
+    return fail('Укажи положительное целое количество предложений');
+  }
+  if (!filePath || path.extname(filePath).toLowerCase() !== '.tsv' || !url) {
+    return fail('Формат: --generate <n> <filepath.tsv> <url>');
+  }
+  const quantity = Number(quantityRaw);
+  const response = await axios.get<MockOffer[]>(url, {timeout: 10000});
+  if (!Array.isArray(response.data) || response.data.length === 0) {
+    return fail('JSON-server должен вернуть непустой массив шаблонов');
+  }
+  response.data.forEach(validateMockOffer);
+  function* lines(): Generator<string> {
+    for (let i = 0; i < quantity; i++) {
+      yield serializeOffer(randomItem(response.data));
+    }
+  }
+  await pipeline(Readable.from(lines()), createWriteStream(path.resolve(filePath), {encoding: 'utf8'}));
+  console.log(chalk.green(`Сохранено предложений: ${quantity}. Файл: ${filePath}`));
+}
+
 async function showVersion(): Promise<void> {
   const directory = path.dirname(fileURLToPath(import.meta.url));
   const packagePath = path.resolve(directory, '../package.json');
@@ -152,8 +220,7 @@ async function main(): Promise<void> {
       await importOffers(args[0]);
       return;
     case '--generate':
-      console.error(chalk.yellow('Команда --generate предусмотрена ТЗ, но реализуется в следующем задании.'));
-      process.exitCode = 1;
+      await generateOffers(args[0], args[1], args[2]);
       return;
     default:
       console.error(chalk.yellow(`Неизвестная команда: ${command}`));
