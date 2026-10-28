@@ -4,7 +4,6 @@ import convictFormatWithValidator from 'convict-format-with-validator';
 import {injectable} from 'inversify';
 import type {AppConfig, ConfigInterface} from './config.interface.js';
 
-// Validator formats (including ipaddress) extend convict's built-in formats.
 convict.addFormats(convictFormatWithValidator);
 
 @injectable()
@@ -14,7 +13,6 @@ export class ConfigService implements ConfigInterface {
   constructor() {
     loadEnv();
 
-    // No production secrets or environment-specific addresses are hardcoded.
     for (const key of ['PORT', 'DB_HOST', 'SALT'] as const) {
       if (!process.env[key]?.trim()) {
         throw new Error(`Обязательная переменная окружения не задана: ${key}`);

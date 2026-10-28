@@ -9,13 +9,19 @@ import {createInterface} from 'node:readline';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 import chalk from 'chalk';
+import 'reflect-metadata';
+import {createContainer} from './shared/container/container.js';
+import {Component} from './shared/container/types.js';
+import {DatabaseService} from './shared/libs/database/database.service.js';
+import type {UserServiceInterface} from './modules/user/user-service.interface.js';
+import type {OfferServiceInterface} from './modules/offer/offer-service.interface.js';
 import type {CityName, Convenience, HousingType, Offer} from './types/offer.type.js';
 
 const HELP = `Доступные команды:
-  --help
-  --version
-  --import <path.tsv>
-  --generate <n> <path> <url>`;
+  --help                Показать справку (по умолчанию)
+  --version             Показать версию из package.json
+  --import <path.tsv> [mongodb-uri]    Сохранить предложения в MongoDB
+  --generate <n> <path> <url>  Сгенерировать n предложений через JSON-server`;
 
 const cities: CityName[] = ['Paris', 'Cologne', 'Brussels', 'Amsterdam', 'Hamburg', 'Dusseldorf'];
 const housingTypes: HousingType[] = ['apartment', 'room', 'house', 'hotel'];
@@ -124,14 +130,14 @@ function serializeOffer(mock: MockOffer): string {
   };
   const [latitude, longitude] = coords[city];
   const chosen = [...new Set(Array.from({length: randomInt(1, 7)}, () => randomItem(conveniences)))];
-  return [
+  return `${[
     mock.title, mock.description, new Date().toISOString(), city,
     mock.previewImage, mock.images.join(';'), String(Math.random() < 0.3),
     'false', (randomInt(10, 50) / 10).toFixed(1), randomItem(housingTypes),
     randomInt(1, 8), randomInt(1, 10), randomInt(100, 100000), chosen.join(';'),
     mock.host.name, mock.host.email, mock.host.avatarUrl ?? '', String(mock.host.isPro),
     latitude, longitude
-  ].join('\t').concat('\n');
+  ].join('\t') }\n`;
 }
 
 function validateMockOffer(value: MockOffer): void {
@@ -178,13 +184,18 @@ async function showVersion(): Promise<void> {
   console.log(chalk.green(packageInfo.version));
 }
 
-async function importOffers(filePath: string | undefined): Promise<void> {
+async function importOffers(filePath: string | undefined, mongoUri?: string): Promise<void> {
   if (!filePath) {
     return fail('После --import укажи путь к TSV-файлу');
   }
   if (path.extname(filePath).toLowerCase() !== '.tsv') {
     return fail('Для импорта нужен файл .tsv');
   }
+  const container = createContainer();
+  const database = container.get<DatabaseService>(Component.Database);
+  const users = container.get<UserServiceInterface>(Component.UserService);
+  const offers = container.get<OfferServiceInterface>(Component.OfferService);
+  await database.connect(mongoUri);
   const stream = createReadStream(path.resolve(process.cwd(), filePath), {encoding: 'utf8'});
   const reader = createInterface({input: stream, crlfDelay: Infinity});
   let count = 0;
@@ -194,14 +205,21 @@ async function importOffers(filePath: string | undefined): Promise<void> {
         continue;
       }
       const offer = parseOffer(line.replace(/^\uFEFF/, ''), count + 1);
+      let host = await users.findByEmail(offer.host.email);
+      if (!host) {
+        host = await users.create(offer.host);
+      }
+      await offers.create(offer, host._id);
       count++;
-      console.log(chalk.cyan(`\nПредложение №${count}: ${offer.title}`));
-      console.log(offer);
+      if (count % 1000 === 0) {
+        console.log(chalk.cyan(`Сохранено предложений: ${count}`));
+      }
     }
-    console.log(chalk.green(`Успешно прочитано предложений: ${count}`));
+    console.log(chalk.green(`Успешно сохранено предложений: ${count}`));
   } finally {
     reader.close();
     stream.destroy();
+    await database.disconnect();
   }
 }
 
@@ -217,7 +235,7 @@ async function main(): Promise<void> {
       await showVersion();
       return;
     case '--import':
-      await importOffers(args[0]);
+      await importOffers(args[0], args[1]);
       return;
     case '--generate':
       await generateOffers(args[0], args[1], args[2]);
